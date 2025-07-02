@@ -51,10 +51,15 @@ def create_scheduling_model(num_days, num_workers, required_staff_weekday, requi
     
     # Define shifts per day type
     shifts_by_day_type = {}
+    today = datetime.now()
+    today_weekday = today.weekday()  # Monday=0, Tuesday=1, ..., Sunday=6
+    
     for d in days:
-        if d % 7 == 5 or d % 7 == 6:  # Saturday or Sunday
+        # Calculate the actual day of week for day d
+        actual_weekday = (today_weekday + d) % 7
+        if actual_weekday == 5 or actual_weekday == 6:  # Saturday (5) or Sunday (6) - weekends
             shifts_by_day_type[d] = weekend_shifts
-        else:  # Monday to Friday
+        else:  # Monday (0) to Friday (4) - weekdays
             shifts_by_day_type[d] = weekday_shifts
     
     # Decision Variables
@@ -72,9 +77,10 @@ def create_scheduling_model(num_days, num_workers, required_staff_weekday, requi
     # Constraint 2: Required Staff Per Shift
     for d in days:
         for s in shifts_by_day_type[d]:
-            if d % 7 == 5 or d % 7 == 6:  # Weekend
+            actual_weekday = (today_weekday + d) % 7
+            if actual_weekday == 5 or actual_weekday == 6:  # Saturday (5) or Sunday (6) - weekends
                 model.Add(sum(x[(w, d, s)] for w in workers) == required_staff_weekend[s])
-            else:  # Weekday
+            else:  # Monday (0) to Friday (4) - weekdays
                 model.Add(sum(x[(w, d, s)] for w in workers) == required_staff_weekday[s])
     
     # Constraint 3: No more than 5 days work per week (rolling window)
@@ -95,7 +101,7 @@ def create_scheduling_model(num_days, num_workers, required_staff_weekday, requi
     
     return solver, status, x, shifts_by_day_type, days, workers
 
-def create_schedule_dataframe(solver, x, shifts_by_day_type, days, workers):
+def create_schedule_dataframe(solver, x, shifts_by_day_type, days, workers, today_weekday):
     """Create a pandas DataFrame with the schedule"""
     schedule_data = []
     
@@ -106,7 +112,7 @@ def create_schedule_dataframe(solver, x, shifts_by_day_type, days, workers):
                 if solver.Value(x[(w, d, s)]) == 1:
                     assigned_workers.append(w)
             
-            # Calculate date
+            # Calculate date - start from today and map days correctly
             start_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
             current_date = start_date + timedelta(days=d)
             
@@ -117,12 +123,12 @@ def create_schedule_dataframe(solver, x, shifts_by_day_type, days, workers):
                 'Shift': s,
                 'Workers': assigned_workers,
                 'Worker_Count': len(assigned_workers),
-                'Is_Weekend': d % 7 >= 5
+                'Is_Weekend': (today_weekday + d) % 7 >= 5  # Saturday (5) or Sunday (6)
             })
     
     return pd.DataFrame(schedule_data)
 
-def create_worker_summary(solver, x, shifts_by_day_type, days, workers):
+def create_worker_summary(solver, x, shifts_by_day_type, days, workers, today_weekday):
     """Create a summary of worker assignments"""
     worker_data = []
     
@@ -137,9 +143,10 @@ def create_worker_summary(solver, x, shifts_by_day_type, days, workers):
                 if solver.Value(x[(w, d, s)]) == 1:
                     total_shifts += 1
                     shift_counts[s] += 1
-                    if d % 7 >= 5:  # Weekend
+                    actual_weekday = (today_weekday + d) % 7
+                    if actual_weekday >= 5:  # Saturday (5) or Sunday (6) - weekend
                         weekend_shifts += 1
-                    else:
+                    else:  # Monday (0) to Friday (4) - weekday
                         weekday_shifts += 1
         
         worker_data.append({
@@ -201,9 +208,25 @@ def main():
                 if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
                     st.success(f"✅ Horário gerado com sucesso! Status: {solver.StatusName(status)}")
                     
+                    # Debug: Show day mapping
+                    with st.expander("🔍 Debug - Mapeamento de Dias"):
+                        today = datetime.now()
+                        today_weekday = today.weekday()
+                        start_date = today.replace(hour=0, minute=0, second=0, microsecond=0)
+                        
+                        st.write(f"**Hoje:** {today.strftime('%d/%m/%Y')} - {today.strftime('%A')} (dia {today_weekday} da semana)")
+                        st.write("**Mapeamento de dias (d = dia do modelo):**")
+                        for d in range(min(7, num_days)):
+                            current_date = start_date + timedelta(days=d)
+                            day_name = current_date.strftime('%A')
+                            actual_weekday = (today_weekday + d) % 7
+                            is_weekend = actual_weekday >= 5
+                            st.write(f"d={d}: {current_date.strftime('%d/%m/%Y')} - {day_name} (dia {actual_weekday}) - {'🏖️ Fim de Semana' if is_weekend else '💼 Dia Útil'}")
+                    
                     # Create dataframes
-                    schedule_df = create_schedule_dataframe(solver, x, shifts_by_day_type, days, workers)
-                    worker_summary = create_worker_summary(solver, x, shifts_by_day_type, days, workers)
+                    today_weekday = datetime.now().weekday()
+                    schedule_df = create_schedule_dataframe(solver, x, shifts_by_day_type, days, workers, today_weekday)
+                    worker_summary = create_worker_summary(solver, x, shifts_by_day_type, days, workers, today_weekday)
                     
                     # Display metrics
                     col1, col2, col3, col4 = st.columns(4)
@@ -242,11 +265,16 @@ def main():
                         if show_weekend_only:
                             filtered_df = filtered_df[filtered_df['Is_Weekend'] == True]
                         
-                        # Display schedule
-                        for _, row in filtered_df.iterrows():
-                            with st.expander(f"{row['Date'].strftime('%d/%m/%Y')} - {row['Day']} - Turno: {row['Shift'].title()}"):
-                                st.write(f"**Funcionários:** {row['Workers']}")
-                                st.write(f"**Quantidade:** {row['Worker_Count']}")
+                                            # Display schedule
+                    for _, row in filtered_df.iterrows():
+                        with st.expander(f"{row['Date'].strftime('%d/%m/%Y')} - {row['Day']} - Turno: {row['Shift'].title()}"):
+                            st.write(f"**Funcionários:** {row['Workers']}")
+                            st.write(f"**Quantidade:** {row['Worker_Count']}")
+                            # Debug info to verify weekend detection
+                            if row['Is_Weekend']:
+                                st.write(f"**Tipo:** 🏖️ Fim de Semana")
+                            else:
+                                st.write(f"**Tipo:** 💼 Dia Útil")
                     
                     with tab2:
                         st.subheader("👥 Resumo por Funcionário")
